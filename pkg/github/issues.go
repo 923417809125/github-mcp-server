@@ -12,11 +12,137 @@ import (
 	ghErrors "github.com/github/github-mcp-server/pkg/errors"
 	"github.com/github/github-mcp-server/pkg/translations"
 	"github.com/go-viper/mapstructure/v2"
-	"github.com/google/go-github/v73/github"
+	"github.com/google/go-github/v74/github"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/shurcooL/githubv4"
 )
+
+// IssueFragment represents a fragment of an issue node in the GraphQL API.
+type IssueFragment struct {
+	Number     githubv4.Int
+	Title      githubv4.String
+	Body       githubv4.String
+	State      githubv4.String
+	DatabaseID int64
+
+	Author struct {
+		Login githubv4.String
+	}
+	CreatedAt githubv4.DateTime
+	UpdatedAt githubv4.DateTime
+	Labels    struct {
+		Nodes []struct {
+			Name        githubv4.String
+			ID          githubv4.String
+			Description githubv4.String
+		}
+	} `graphql:"labels(first: 100)"`
+	Comments struct {
+		TotalCount githubv4.Int
+	} `graphql:"comments"`
+}
+
+// Common interface for all issue query types
+type IssueQueryResult interface {
+	GetIssueFragment() IssueQueryFragment
+}
+
+type IssueQueryFragment struct {
+	Nodes    []IssueFragment `graphql:"nodes"`
+	PageInfo struct {
+		HasNextPage     githubv4.Boolean
+		HasPreviousPage githubv4.Boolean
+		StartCursor     githubv4.String
+		EndCursor       githubv4.String
+	}
+	TotalCount int
+}
+
+// ListIssuesQuery is the root query structure for fetching issues with optional label filtering.
+type ListIssuesQuery struct {
+	Repository struct {
+		Issues IssueQueryFragment `graphql:"issues(first: $first, after: $after, states: $states, orderBy: {field: $orderBy, direction: $direction})"`
+	} `graphql:"repository(owner: $owner, name: $repo)"`
+}
+
+// ListIssuesQueryTypeWithLabels is the query structure for fetching issues with optional label filtering.
+type ListIssuesQueryTypeWithLabels struct {
+	Repository struct {
+		Issues IssueQueryFragment `graphql:"issues(first: $first, after: $after, labels: $labels, states: $states, orderBy: {field: $orderBy, direction: $direction})"`
+	} `graphql:"repository(owner: $owner, name: $repo)"`
+}
+
+// ListIssuesQueryWithSince is the query structure for fetching issues without label filtering but with since filtering.
+type ListIssuesQueryWithSince struct {
+	Repository struct {
+		Issues IssueQueryFragment `graphql:"issues(first: $first, after: $after, states: $states, orderBy: {field: $orderBy, direction: $direction}, filterBy: {since: $since})"`
+	} `graphql:"repository(owner: $owner, name: $repo)"`
+}
+
+// ListIssuesQueryTypeWithLabelsWithSince is the query structure for fetching issues with both label and since filtering.
+type ListIssuesQueryTypeWithLabelsWithSince struct {
+	Repository struct {
+		Issues IssueQueryFragment `graphql:"issues(first: $first, after: $after, labels: $labels, states: $states, orderBy: {field: $orderBy, direction: $direction}, filterBy: {since: $since})"`
+	} `graphql:"repository(owner: $owner, name: $repo)"`
+}
+
+// Implement the interface for all query types
+func (q *ListIssuesQueryTypeWithLabels) GetIssueFragment() IssueQueryFragment {
+	return q.Repository.Issues
+}
+
+func (q *ListIssuesQuery) GetIssueFragment() IssueQueryFragment {
+	return q.Repository.Issues
+}
+
+func (q *ListIssuesQueryWithSince) GetIssueFragment() IssueQueryFragment {
+	return q.Repository.Issues
+}
+
+func (q *ListIssuesQueryTypeWithLabelsWithSince) GetIssueFragment() IssueQueryFragment {
+	return q.Repository.Issues
+}
+
+func getIssueQueryType(hasLabels bool, hasSince bool) any {
+	switch {
+	case hasLabels && hasSince:
+		return &ListIssuesQueryTypeWithLabelsWithSince{}
+	case hasLabels:
+		return &ListIssuesQueryTypeWithLabels{}
+	case hasSince:
+		return &ListIssuesQueryWithSince{}
+	default:
+		return &ListIssuesQuery{}
+	}
+}
+
+func fragmentToIssue(fragment IssueFragment) *github.Issue {
+	// Convert GraphQL labels to GitHub API labels format
+	var foundLabels []*github.Label
+	for _, labelNode := range fragment.Labels.Nodes {
+		foundLabels = append(foundLabels, &github.Label{
+			Name:        github.Ptr(string(labelNode.Name)),
+			NodeID:      github.Ptr(string(labelNode.ID)),
+			Description: github.Ptr(string(labelNode.Description)),
+		})
+	}
+
+	return &github.Issue{
+		Number:    github.Ptr(int(fragment.Number)),
+		Title:     github.Ptr(string(fragment.Title)),
+		CreatedAt: &github.Timestamp{Time: fragment.CreatedAt.Time},
+		UpdatedAt: &github.Timestamp{Time: fragment.UpdatedAt.Time},
+		User: &github.User{
+			Login: github.Ptr(string(fragment.Author.Login)),
+		},
+		State:    github.Ptr(string(fragment.State)),
+		ID:       github.Ptr(fragment.DatabaseID),
+		Body:     github.Ptr(string(fragment.Body)),
+		Labels:   foundLabels,
+		Comments: github.Ptr(int(fragment.Comments.TotalCount)),
+	}
+}
 
 // GetIssue creates a tool to get details of a specific issue in a GitHub repository.
 func GetIssue(getClient GetClientFn, t translations.TranslationHelperFunc) (tool mcp.Tool, handler server.ToolHandlerFunc) {
@@ -74,6 +200,53 @@ func GetIssue(getClient GetClientFn, t translations.TranslationHelperFunc) (tool
 			r, err := json.Marshal(issue)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal issue: %w", err)
+			}
+
+			return mcp.NewToolResultText(string(r)), nil
+		}
+}
+
+// ListIssueTypes creates a tool to list defined issue types for an organization. This can be used to understand supported issue type values for creating or updating issues.
+func ListIssueTypes(getClient GetClientFn, t translations.TranslationHelperFunc) (tool mcp.Tool, handler server.ToolHandlerFunc) {
+
+	return mcp.NewTool("list_issue_types",
+			mcp.WithDescription(t("TOOL_LIST_ISSUE_TYPES_FOR_ORG", "List supported issue types for repository owner (organization).")),
+			mcp.WithToolAnnotation(mcp.ToolAnnotation{
+				Title:        t("TOOL_LIST_ISSUE_TYPES_USER_TITLE", "List available issue types"),
+				ReadOnlyHint: ToBoolPtr(true),
+			}),
+			mcp.WithString("owner",
+				mcp.Required(),
+				mcp.Description("The organization owner of the repository"),
+			),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			owner, err := RequiredParam[string](request, "owner")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+
+			client, err := getClient(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
+			}
+			issueTypes, resp, err := client.Organizations.ListIssueTypes(ctx, owner)
+			if err != nil {
+				return nil, fmt.Errorf("failed to list issue types: %w", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusOK {
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read response body: %w", err)
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("failed to list issue types: %s", string(body))), nil
+			}
+
+			r, err := json.Marshal(issueTypes)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal issue types: %w", err)
 			}
 
 			return mcp.NewToolResultText(string(r)), nil
@@ -384,57 +557,29 @@ func RemoveSubIssue(getClient GetClientFn, t translations.TranslationHelperFunc)
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
 
-			// Create the request body
-			requestBody := map[string]interface{}{
-				"sub_issue_id": subIssueID,
-			}
-			reqBodyBytes, err := json.Marshal(requestBody)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal request body: %w", err)
+			subIssueRequest := github.SubIssueRequest{
+				SubIssueID: int64(subIssueID),
 			}
 
-			// Create the HTTP request
-			url := fmt.Sprintf("%srepos/%s/%s/issues/%d/sub_issue",
-				client.BaseURL.String(), owner, repo, issueNumber)
-			req, err := http.NewRequestWithContext(ctx, "DELETE", url, strings.NewReader(string(reqBodyBytes)))
+			subIssue, resp, err := client.SubIssue.Remove(ctx, owner, repo, int64(issueNumber), subIssueRequest)
 			if err != nil {
-				return nil, fmt.Errorf("failed to create request: %w", err)
-			}
-			req.Header.Set("Accept", "application/vnd.github+json")
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-			httpClient := client.Client() // Use authenticated GitHub client
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				var ghResp *github.Response
-				if resp != nil {
-					ghResp = &github.Response{Response: resp}
-				}
 				return ghErrors.NewGitHubAPIErrorResponse(ctx,
 					"failed to remove sub-issue",
-					ghResp,
+					resp,
 					err,
 				), nil
 			}
 			defer func() { _ = resp.Body.Close() }()
 
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read response body: %w", err)
-			}
-
 			if resp.StatusCode != http.StatusOK {
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read response body: %w", err)
+				}
 				return mcp.NewToolResultError(fmt.Sprintf("failed to remove sub-issue: %s", string(body))), nil
 			}
 
-			// Parse and re-marshal to ensure consistent formatting
-			var result interface{}
-			if err := json.Unmarshal(body, &result); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-			}
-
-			r, err := json.Marshal(result)
+			r, err := json.Marshal(subIssue)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal response: %w", err)
 			}
@@ -569,10 +714,10 @@ func SearchIssues(getClient GetClientFn, t translations.TranslationHelperFunc) (
 				mcp.Description("Search query using GitHub issues search syntax"),
 			),
 			mcp.WithString("owner",
-				mcp.Description("Optional repository owner. If provided with repo, only notifications for this repository are listed."),
+				mcp.Description("Optional repository owner. If provided with repo, only issues for this repository are listed."),
 			),
 			mcp.WithString("repo",
-				mcp.Description("Optional repository name. If provided with owner, only notifications for this repository are listed."),
+				mcp.Description("Optional repository name. If provided with owner, only issues for this repository are listed."),
 			),
 			mcp.WithString("sort",
 				mcp.Description("Sort field by number of matches of categories, defaults to best match"),
@@ -643,6 +788,9 @@ func CreateIssue(getClient GetClientFn, t translations.TranslationHelperFunc) (t
 			mcp.WithNumber("milestone",
 				mcp.Description("Milestone number"),
 			),
+			mcp.WithString("type",
+				mcp.Description("Type of this issue"),
+			),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			owner, err := RequiredParam[string](request, "owner")
@@ -687,6 +835,12 @@ func CreateIssue(getClient GetClientFn, t translations.TranslationHelperFunc) (t
 				milestoneNum = &milestone
 			}
 
+			// Get optional type
+			issueType, err := OptionalParam[string](request, "type")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+
 			// Create the issue request
 			issueRequest := &github.IssueRequest{
 				Title:     github.Ptr(title),
@@ -694,6 +848,10 @@ func CreateIssue(getClient GetClientFn, t translations.TranslationHelperFunc) (t
 				Assignees: &assignees,
 				Labels:    &labels,
 				Milestone: milestoneNum,
+			}
+
+			if issueType != "" {
+				issueRequest.Type = github.Ptr(issueType)
 			}
 
 			client, err := getClient(ctx)
@@ -724,9 +882,9 @@ func CreateIssue(getClient GetClientFn, t translations.TranslationHelperFunc) (t
 }
 
 // ListIssues creates a tool to list and filter repository issues
-func ListIssues(getClient GetClientFn, t translations.TranslationHelperFunc) (tool mcp.Tool, handler server.ToolHandlerFunc) {
+func ListIssues(getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (tool mcp.Tool, handler server.ToolHandlerFunc) {
 	return mcp.NewTool("list_issues",
-			mcp.WithDescription(t("TOOL_LIST_ISSUES_DESCRIPTION", "List issues in a GitHub repository.")),
+			mcp.WithDescription(t("TOOL_LIST_ISSUES_DESCRIPTION", "List issues in a GitHub repository. For pagination, use the 'endCursor' from the previous response's 'pageInfo' in the 'after' parameter.")),
 			mcp.WithToolAnnotation(mcp.ToolAnnotation{
 				Title:        t("TOOL_LIST_ISSUES_USER_TITLE", "List issues"),
 				ReadOnlyHint: ToBoolPtr(true),
@@ -740,8 +898,8 @@ func ListIssues(getClient GetClientFn, t translations.TranslationHelperFunc) (to
 				mcp.Description("Repository name"),
 			),
 			mcp.WithString("state",
-				mcp.Description("Filter by state"),
-				mcp.Enum("open", "closed", "all"),
+				mcp.Description("Filter by state, by default both open and closed issues are returned when not provided"),
+				mcp.Enum("OPEN", "CLOSED"),
 			),
 			mcp.WithArray("labels",
 				mcp.Description("Filter by labels"),
@@ -751,18 +909,18 @@ func ListIssues(getClient GetClientFn, t translations.TranslationHelperFunc) (to
 					},
 				),
 			),
-			mcp.WithString("sort",
-				mcp.Description("Sort order"),
-				mcp.Enum("created", "updated", "comments"),
+			mcp.WithString("orderBy",
+				mcp.Description("Order issues by field. If provided, the 'direction' also needs to be provided."),
+				mcp.Enum("CREATED_AT", "UPDATED_AT", "COMMENTS"),
 			),
 			mcp.WithString("direction",
-				mcp.Description("Sort direction"),
-				mcp.Enum("asc", "desc"),
+				mcp.Description("Order direction. If provided, the 'orderBy' also needs to be provided."),
+				mcp.Enum("ASC", "DESC"),
 			),
 			mcp.WithString("since",
 				mcp.Description("Filter by date (ISO 8601 timestamp)"),
 			),
-			WithPagination(),
+			WithCursorPagination(),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			owner, err := RequiredParam[string](request, "owner")
@@ -774,74 +932,164 @@ func ListIssues(getClient GetClientFn, t translations.TranslationHelperFunc) (to
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			opts := &github.IssueListByRepoOptions{}
-
 			// Set optional parameters if provided
-			opts.State, err = OptionalParam[string](request, "state")
+			state, err := OptionalParam[string](request, "state")
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
+			}
+
+			// If the state has a value, cast into an array of strings
+			var states []githubv4.IssueState
+			if state != "" {
+				states = append(states, githubv4.IssueState(state))
+			} else {
+				states = []githubv4.IssueState{githubv4.IssueStateOpen, githubv4.IssueStateClosed}
 			}
 
 			// Get labels
-			opts.Labels, err = OptionalStringArrayParam(request, "labels")
+			labels, err := OptionalStringArrayParam(request, "labels")
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			opts.Sort, err = OptionalParam[string](request, "sort")
+			orderBy, err := OptionalParam[string](request, "orderBy")
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			opts.Direction, err = OptionalParam[string](request, "direction")
+			direction, err := OptionalParam[string](request, "direction")
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
+			}
+
+			// These variables are required for the GraphQL query to be set by default
+			// If orderBy is empty, default to CREATED_AT
+			if orderBy == "" {
+				orderBy = "CREATED_AT"
+			}
+			// If direction is empty, default to DESC
+			if direction == "" {
+				direction = "DESC"
 			}
 
 			since, err := OptionalParam[string](request, "since")
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
+
+			// There are two optional parameters: since and labels.
+			var sinceTime time.Time
+			var hasSince bool
 			if since != "" {
-				timestamp, err := parseISOTimestamp(since)
+				sinceTime, err = parseISOTimestamp(since)
 				if err != nil {
 					return mcp.NewToolResultError(fmt.Sprintf("failed to list issues: %s", err.Error())), nil
 				}
-				opts.Since = timestamp
+				hasSince = true
 			}
+			hasLabels := len(labels) > 0
 
-			if page, ok := request.GetArguments()["page"].(float64); ok {
-				opts.ListOptions.Page = int(page)
-			}
-
-			if perPage, ok := request.GetArguments()["perPage"].(float64); ok {
-				opts.ListOptions.PerPage = int(perPage)
-			}
-
-			client, err := getClient(ctx)
+			// Get pagination parameters and convert to GraphQL format
+			pagination, err := OptionalCursorPaginationParams(request)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
+				return nil, err
 			}
-			issues, resp, err := client.Issues.ListByRepo(ctx, owner, repo, opts)
-			if err != nil {
-				return nil, fmt.Errorf("failed to list issues: %w", err)
-			}
-			defer func() { _ = resp.Body.Close() }()
 
-			if resp.StatusCode != http.StatusOK {
-				body, err := io.ReadAll(resp.Body)
-				if err != nil {
-					return nil, fmt.Errorf("failed to read response body: %w", err)
+			// Check if someone tried to use page-based pagination instead of cursor-based
+			if _, pageProvided := request.GetArguments()["page"]; pageProvided {
+				return mcp.NewToolResultError("This tool uses cursor-based pagination. Use the 'after' parameter with the 'endCursor' value from the previous response instead of 'page'."), nil
+			}
+
+			// Check if pagination parameters were explicitly provided
+			_, perPageProvided := request.GetArguments()["perPage"]
+			paginationExplicit := perPageProvided
+
+			paginationParams, err := pagination.ToGraphQLParams()
+			if err != nil {
+				return nil, err
+			}
+
+			// Use default of 30 if pagination was not explicitly provided
+			if !paginationExplicit {
+				defaultFirst := int32(DefaultGraphQLPageSize)
+				paginationParams.First = &defaultFirst
+			}
+
+			client, err := getGQLClient(ctx)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("failed to get GitHub GQL client: %v", err)), nil
+			}
+
+			vars := map[string]interface{}{
+				"owner":     githubv4.String(owner),
+				"repo":      githubv4.String(repo),
+				"states":    states,
+				"orderBy":   githubv4.IssueOrderField(orderBy),
+				"direction": githubv4.OrderDirection(direction),
+				"first":     githubv4.Int(*paginationParams.First),
+			}
+
+			if paginationParams.After != nil {
+				vars["after"] = githubv4.String(*paginationParams.After)
+			} else {
+				// Used within query, therefore must be set to nil and provided as $after
+				vars["after"] = (*githubv4.String)(nil)
+			}
+
+			// Ensure optional parameters are set
+			if hasLabels {
+				// Use query with labels filtering - convert string labels to githubv4.String slice
+				labelStrings := make([]githubv4.String, len(labels))
+				for i, label := range labels {
+					labelStrings[i] = githubv4.String(label)
 				}
-				return mcp.NewToolResultError(fmt.Sprintf("failed to list issues: %s", string(body))), nil
+				vars["labels"] = labelStrings
 			}
 
-			r, err := json.Marshal(issues)
+			if hasSince {
+				vars["since"] = githubv4.DateTime{Time: sinceTime}
+			}
+
+			issueQuery := getIssueQueryType(hasLabels, hasSince)
+			if err := client.Query(ctx, issueQuery, vars); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+
+			// Extract and convert all issue nodes using the common interface
+			var issues []*github.Issue
+			var pageInfo struct {
+				HasNextPage     githubv4.Boolean
+				HasPreviousPage githubv4.Boolean
+				StartCursor     githubv4.String
+				EndCursor       githubv4.String
+			}
+			var totalCount int
+
+			if queryResult, ok := issueQuery.(IssueQueryResult); ok {
+				fragment := queryResult.GetIssueFragment()
+				for _, issue := range fragment.Nodes {
+					issues = append(issues, fragmentToIssue(issue))
+				}
+				pageInfo = fragment.PageInfo
+				totalCount = fragment.TotalCount
+			}
+
+			// Create response with issues
+			response := map[string]interface{}{
+				"issues": issues,
+				"pageInfo": map[string]interface{}{
+					"hasNextPage":     pageInfo.HasNextPage,
+					"hasPreviousPage": pageInfo.HasPreviousPage,
+					"startCursor":     string(pageInfo.StartCursor),
+					"endCursor":       string(pageInfo.EndCursor),
+				},
+				"totalCount": totalCount,
+			}
+			out, err := json.Marshal(response)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal issues: %w", err)
 			}
-
-			return mcp.NewToolResultText(string(r)), nil
+			return mcp.NewToolResultText(string(out)), nil
 		}
 }
 
@@ -893,6 +1141,9 @@ func UpdateIssue(getClient GetClientFn, t translations.TranslationHelperFunc) (t
 			),
 			mcp.WithNumber("milestone",
 				mcp.Description("New milestone number"),
+			),
+			mcp.WithString("type",
+				mcp.Description("New issue type"),
 			),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -962,6 +1213,15 @@ func UpdateIssue(getClient GetClientFn, t translations.TranslationHelperFunc) (t
 			if milestone != 0 {
 				milestoneNum := milestone
 				issueRequest.Milestone = &milestoneNum
+			}
+
+			// Get issue type
+			issueType, err := OptionalParam[string](request, "type")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			if issueType != "" {
+				issueRequest.Type = github.Ptr(issueType)
 			}
 
 			client, err := getClient(ctx)
@@ -1292,7 +1552,7 @@ func AssignCodingAgentPrompt(t translations.TranslationHelperFunc) (tool mcp.Pro
 
 			messages := []mcp.PromptMessage{
 				{
-					Role:    "system",
+					Role:    "user",
 					Content: mcp.NewTextContent("You are a personal assistant for GitHub the Copilot GitHub Coding Agent. Your task is to help the user assign tasks to the Coding Agent based on their open GitHub issues. You can use `assign_copilot_to_issue` tool to assign the Coding Agent to issues that are suitable for autonomous work, and `search_issues` tool to find issues that match the user's criteria. You can also use `list_issues` to get a list of issues in the repository."),
 				},
 				{

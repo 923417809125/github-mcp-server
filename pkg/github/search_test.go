@@ -8,7 +8,7 @@ import (
 
 	"github.com/github/github-mcp-server/internal/toolsnaps"
 	"github.com/github/github-mcp-server/pkg/translations"
-	"github.com/google/go-github/v73/github"
+	"github.com/google/go-github/v74/github"
 	"github.com/migueleliasweb/go-github-mock/src/mock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -411,6 +411,46 @@ func Test_SearchUsers(t *testing.T) {
 			expectedResult: mockSearchResult,
 		},
 		{
+			name: "query with existing type:user filter - no duplication",
+			mockedClient: mock.NewMockedHTTPClient(
+				mock.WithRequestMatchHandler(
+					mock.GetSearchUsers,
+					expectQueryParams(t, map[string]string{
+						"q":        "type:user location:seattle followers:>100",
+						"page":     "1",
+						"per_page": "30",
+					}).andThen(
+						mockResponse(t, http.StatusOK, mockSearchResult),
+					),
+				),
+			),
+			requestArgs: map[string]interface{}{
+				"query": "type:user location:seattle followers:>100",
+			},
+			expectError:    false,
+			expectedResult: mockSearchResult,
+		},
+		{
+			name: "complex query with existing type:user filter and OR operators",
+			mockedClient: mock.NewMockedHTTPClient(
+				mock.WithRequestMatchHandler(
+					mock.GetSearchUsers,
+					expectQueryParams(t, map[string]string{
+						"q":        "type:user (location:seattle OR location:california) followers:>50",
+						"page":     "1",
+						"per_page": "30",
+					}).andThen(
+						mockResponse(t, http.StatusOK, mockSearchResult),
+					),
+				),
+			),
+			requestArgs: map[string]interface{}{
+				"query": "type:user (location:seattle OR location:california) followers:>50",
+			},
+			expectError:    false,
+			expectedResult: mockSearchResult,
+		},
+		{
 			name: "search users fails",
 			mockedClient: mock.NewMockedHTTPClient(
 				mock.WithRequestMatchHandler(
@@ -533,6 +573,46 @@ func Test_SearchOrgs(t *testing.T) {
 			),
 			requestArgs: map[string]interface{}{
 				"query": "github",
+			},
+			expectError:    false,
+			expectedResult: mockSearchResult,
+		},
+		{
+			name: "query with existing type:org filter - no duplication",
+			mockedClient: mock.NewMockedHTTPClient(
+				mock.WithRequestMatchHandler(
+					mock.GetSearchUsers,
+					expectQueryParams(t, map[string]string{
+						"q":        "type:org location:california followers:>1000",
+						"page":     "1",
+						"per_page": "30",
+					}).andThen(
+						mockResponse(t, http.StatusOK, mockSearchResult),
+					),
+				),
+			),
+			requestArgs: map[string]interface{}{
+				"query": "type:org location:california followers:>1000",
+			},
+			expectError:    false,
+			expectedResult: mockSearchResult,
+		},
+		{
+			name: "complex query with existing type:org filter and OR operators",
+			mockedClient: mock.NewMockedHTTPClient(
+				mock.WithRequestMatchHandler(
+					mock.GetSearchUsers,
+					expectQueryParams(t, map[string]string{
+						"q":        "type:org (location:seattle OR location:california OR location:newyork) repos:>10",
+						"page":     "1",
+						"per_page": "30",
+					}).andThen(
+						mockResponse(t, http.StatusOK, mockSearchResult),
+					),
+				),
+			),
+			requestArgs: map[string]interface{}{
+				"query": "type:org (location:seattle OR location:california OR location:newyork) repos:>10",
 			},
 			expectError:    false,
 			expectedResult: mockSearchResult,

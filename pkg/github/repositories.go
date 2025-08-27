@@ -13,7 +13,7 @@ import (
 	ghErrors "github.com/github/github-mcp-server/pkg/errors"
 	"github.com/github/github-mcp-server/pkg/raw"
 	"github.com/github/github-mcp-server/pkg/translations"
-	"github.com/google/go-github/v73/github"
+	"github.com/google/go-github/v74/github"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -1321,6 +1321,192 @@ func GetTag(getClient GetClientFn, t translations.TranslationHelperFunc) (tool m
 		}
 }
 
+// ListReleases creates a tool to list releases in a GitHub repository.
+func ListReleases(getClient GetClientFn, t translations.TranslationHelperFunc) (tool mcp.Tool, handler server.ToolHandlerFunc) {
+	return mcp.NewTool("list_releases",
+			mcp.WithDescription(t("TOOL_LIST_RELEASES_DESCRIPTION", "List releases in a GitHub repository")),
+			mcp.WithToolAnnotation(mcp.ToolAnnotation{
+				Title:        t("TOOL_LIST_RELEASES_USER_TITLE", "List releases"),
+				ReadOnlyHint: ToBoolPtr(true),
+			}),
+			mcp.WithString("owner",
+				mcp.Required(),
+				mcp.Description("Repository owner"),
+			),
+			mcp.WithString("repo",
+				mcp.Required(),
+				mcp.Description("Repository name"),
+			),
+			WithPagination(),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			owner, err := RequiredParam[string](request, "owner")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			repo, err := RequiredParam[string](request, "repo")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			pagination, err := OptionalPaginationParams(request)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+
+			opts := &github.ListOptions{
+				Page:    pagination.Page,
+				PerPage: pagination.PerPage,
+			}
+
+			client, err := getClient(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
+			}
+
+			releases, resp, err := client.Repositories.ListReleases(ctx, owner, repo, opts)
+			if err != nil {
+				return nil, fmt.Errorf("failed to list releases: %w", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusOK {
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read response body: %w", err)
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("failed to list releases: %s", string(body))), nil
+			}
+
+			r, err := json.Marshal(releases)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal response: %w", err)
+			}
+
+			return mcp.NewToolResultText(string(r)), nil
+		}
+}
+
+// GetLatestRelease creates a tool to get the latest release in a GitHub repository.
+func GetLatestRelease(getClient GetClientFn, t translations.TranslationHelperFunc) (tool mcp.Tool, handler server.ToolHandlerFunc) {
+	return mcp.NewTool("get_latest_release",
+			mcp.WithDescription(t("TOOL_GET_LATEST_RELEASE_DESCRIPTION", "Get the latest release in a GitHub repository")),
+			mcp.WithToolAnnotation(mcp.ToolAnnotation{
+				Title:        t("TOOL_GET_LATEST_RELEASE_USER_TITLE", "Get latest release"),
+				ReadOnlyHint: ToBoolPtr(true),
+			}),
+			mcp.WithString("owner",
+				mcp.Required(),
+				mcp.Description("Repository owner"),
+			),
+			mcp.WithString("repo",
+				mcp.Required(),
+				mcp.Description("Repository name"),
+			),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			owner, err := RequiredParam[string](request, "owner")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			repo, err := RequiredParam[string](request, "repo")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+
+			client, err := getClient(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
+			}
+
+			release, resp, err := client.Repositories.GetLatestRelease(ctx, owner, repo)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get latest release: %w", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusOK {
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read response body: %w", err)
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("failed to get latest release: %s", string(body))), nil
+			}
+
+			r, err := json.Marshal(release)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal response: %w", err)
+			}
+
+			return mcp.NewToolResultText(string(r)), nil
+		}
+}
+
+func GetReleaseByTag(getClient GetClientFn, t translations.TranslationHelperFunc) (tool mcp.Tool, handler server.ToolHandlerFunc) {
+	return mcp.NewTool("get_release_by_tag",
+			mcp.WithDescription(t("TOOL_GET_RELEASE_BY_TAG_DESCRIPTION", "Get a specific release by its tag name in a GitHub repository")),
+			mcp.WithToolAnnotation(mcp.ToolAnnotation{
+				Title:        t("TOOL_GET_RELEASE_BY_TAG_USER_TITLE", "Get a release by tag name"),
+				ReadOnlyHint: ToBoolPtr(true),
+			}),
+			mcp.WithString("owner",
+				mcp.Required(),
+				mcp.Description("Repository owner"),
+			),
+			mcp.WithString("repo",
+				mcp.Required(),
+				mcp.Description("Repository name"),
+			),
+			mcp.WithString("tag",
+				mcp.Required(),
+				mcp.Description("Tag name (e.g., 'v1.0.0')"),
+			),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			owner, err := RequiredParam[string](request, "owner")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			repo, err := RequiredParam[string](request, "repo")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			tag, err := RequiredParam[string](request, "tag")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+
+			client, err := getClient(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
+			}
+
+			release, resp, err := client.Repositories.GetReleaseByTag(ctx, owner, repo, tag)
+			if err != nil {
+				return ghErrors.NewGitHubAPIErrorResponse(ctx,
+					fmt.Sprintf("failed to get release by tag: %s", tag),
+					resp,
+					err,
+				), nil
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusOK {
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read response body: %w", err)
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("failed to get release by tag: %s", string(body))), nil
+			}
+
+			r, err := json.Marshal(release)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal response: %w", err)
+			}
+
+			return mcp.NewToolResultText(string(r)), nil
+		}
+}
+
 // filterPaths filters the entries in a GitHub tree to find paths that
 // match the given suffix.
 // maxResults limits the number of results returned to first maxResults entries,
@@ -1358,36 +1544,100 @@ func filterPaths(entries []*github.TreeEntry, path string, maxResults int) []str
 	return matchedPaths
 }
 
-// resolveGitReference resolves git references with the following logic:
-// 1. If SHA is provided, it takes precedence
-// 2. If neither is provided, use the default branch as ref
-// 3. Get commit SHA from the ref
-// Refs can look like `refs/tags/{tag}`, `refs/heads/{branch}` or `refs/pull/{pr_number}/head`
-// The function returns the resolved ref, commit SHA and any error.
+// resolveGitReference takes a user-provided ref and sha and resolves them into a
+// definitive commit SHA and its corresponding fully-qualified reference.
+//
+// The resolution logic follows a clear priority:
+//
+//  1. If a specific commit `sha` is provided, it takes precedence and is used directly,
+//     and all reference resolution is skipped.
+//
+//  2. If no `sha` is provided, the function resolves the `ref`
+//     string into a fully-qualified format (e.g., "refs/heads/main") by trying
+//     the following steps in order:
+//     a). **Empty Ref:** If `ref` is empty, the repository's default branch is used.
+//     b). **Fully-Qualified:** If `ref` already starts with "refs/", it's considered fully
+//     qualified and used as-is.
+//     c). **Partially-Qualified:** If `ref` starts with "heads/" or "tags/", it is
+//     prefixed with "refs/" to make it fully-qualified.
+//     d). **Short Name:** Otherwise, the `ref` is treated as a short name. The function
+//     first attempts to resolve it as a branch ("refs/heads/<ref>"). If that
+//     returns a 404 Not Found error, it then attempts to resolve it as a tag
+//     ("refs/tags/<ref>").
+//
+//  3. **Final Lookup:** Once a fully-qualified ref is determined, a final API call
+//     is made to fetch that reference's definitive commit SHA.
+//
+// Any unexpected (non-404) errors during the resolution process are returned
+// immediately. All API errors are logged with rich context to aid diagnostics.
 func resolveGitReference(ctx context.Context, githubClient *github.Client, owner, repo, ref, sha string) (*raw.ContentOpts, error) {
-	// 1. If SHA is provided, use it directly
+	// 1) If SHA explicitly provided, it's the highest priority.
 	if sha != "" {
 		return &raw.ContentOpts{Ref: "", SHA: sha}, nil
 	}
 
-	// 2. If neither provided, use the default branch as ref
-	if ref == "" {
+	originalRef := ref // Keep original ref for clearer error messages down the line.
+
+	// 2) If no SHA is provided, we try to resolve the ref into a fully-qualified format.
+	var reference *github.Reference
+	var resp *github.Response
+	var err error
+
+	switch {
+	case originalRef == "":
+		// 2a) If ref is empty, determine the default branch.
 		repoInfo, resp, err := githubClient.Repositories.Get(ctx, owner, repo)
 		if err != nil {
 			_, _ = ghErrors.NewGitHubAPIErrorToCtx(ctx, "failed to get repository info", resp, err)
 			return nil, fmt.Errorf("failed to get repository info: %w", err)
 		}
 		ref = fmt.Sprintf("refs/heads/%s", repoInfo.GetDefaultBranch())
+	case strings.HasPrefix(originalRef, "refs/"):
+		// 2b) Already fully qualified. The reference will be fetched at the end.
+	case strings.HasPrefix(originalRef, "heads/") || strings.HasPrefix(originalRef, "tags/"):
+		// 2c) Partially qualified. Make it fully qualified.
+		ref = "refs/" + originalRef
+	default:
+		// 2d) It's a short name, so we try to resolve it to either a branch or a tag.
+		branchRef := "refs/heads/" + originalRef
+		reference, resp, err = githubClient.Git.GetRef(ctx, owner, repo, branchRef)
+
+		if err == nil {
+			ref = branchRef // It's a branch.
+		} else {
+			// The branch lookup failed. Check if it was a 404 Not Found error.
+			ghErr, isGhErr := err.(*github.ErrorResponse)
+			if isGhErr && ghErr.Response.StatusCode == http.StatusNotFound {
+				tagRef := "refs/tags/" + originalRef
+				reference, resp, err = githubClient.Git.GetRef(ctx, owner, repo, tagRef)
+				if err == nil {
+					ref = tagRef // It's a tag.
+				} else {
+					// The tag lookup also failed. Check if it was a 404 Not Found error.
+					ghErr2, isGhErr2 := err.(*github.ErrorResponse)
+					if isGhErr2 && ghErr2.Response.StatusCode == http.StatusNotFound {
+						return nil, fmt.Errorf("could not resolve ref %q as a branch or a tag", originalRef)
+					}
+					// The tag lookup failed for a different reason.
+					_, _ = ghErrors.NewGitHubAPIErrorToCtx(ctx, "failed to get reference (tag)", resp, err)
+					return nil, fmt.Errorf("failed to get reference for tag '%s': %w", originalRef, err)
+				}
+			} else {
+				// The branch lookup failed for a different reason.
+				_, _ = ghErrors.NewGitHubAPIErrorToCtx(ctx, "failed to get reference (branch)", resp, err)
+				return nil, fmt.Errorf("failed to get reference for branch '%s': %w", originalRef, err)
+			}
+		}
 	}
 
-	// 3. Get the SHA from the ref
-	reference, resp, err := githubClient.Git.GetRef(ctx, owner, repo, ref)
-	if err != nil {
-		_, _ = ghErrors.NewGitHubAPIErrorToCtx(ctx, "failed to get reference", resp, err)
-		return nil, fmt.Errorf("failed to get reference: %w", err)
+	if reference == nil {
+		reference, resp, err = githubClient.Git.GetRef(ctx, owner, repo, ref)
+		if err != nil {
+			_, _ = ghErrors.NewGitHubAPIErrorToCtx(ctx, "failed to get final reference", resp, err)
+			return nil, fmt.Errorf("failed to get final reference for %q: %w", ref, err)
+		}
 	}
+
 	sha = reference.GetObject().GetSHA()
-
-	// Use provided ref, or it will be empty which defaults to the default branch
 	return &raw.ContentOpts{Ref: ref, SHA: sha}, nil
 }
